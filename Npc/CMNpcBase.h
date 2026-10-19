@@ -1,4 +1,4 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -13,6 +13,7 @@ class UCMLocalEventManager;
 class UCMNpcComponentBase;
 class UCapsuleComponent;
 class UCameraComponent;
+class USkeletalMeshComponent;
 class UCMNpcDefinition;
 class UCMNpcDialogueWidget;
 class UCMDataAsset_ItemBase;
@@ -64,30 +65,35 @@ struct FCMShopItemContent: public FTableRowBase
 	FText ItemDescription;
 };
 
+// NOTE: 기존 이름(UCMDialoagueNode)에서 오타 수정.
+// 기존 블루프린트/에셋 참조 유지를 위해 DefaultEngine.ini 에 ClassRedirects 추가 필요:
+// [CoreRedirects]
+// +ClassRedirects=(OldName="/Script/CrimsonMoon.CMDialoagueNode",NewName="/Script/CrimsonMoon.CMDialogueNode")
 UCLASS(BlueprintType)
-class UCMDialoagueNode : public UObject
+class UCMDialogueNode : public UObject
 {
 	GENERATED_BODY()
 
 public:
+	// UE GC는 도달성(mark & sweep) 기반이므로 Parent <-> Children 순환 참조가 있어도 정상적으로 회수됨
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Dialogue")
-	TObjectPtr<UCMDialoagueNode> ParentNode = nullptr;
+	TObjectPtr<UCMDialogueNode> ParentNode = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dialogue")
-	TArray<TObjectPtr<UCMDialoagueNode>> Children;
+	TArray<TObjectPtr<UCMDialogueNode>> Children;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dialogue")
 	FText DialogueText;
 };
 
 UCLASS(BlueprintType)
-class UCMActionNode : public UCMDialoagueNode
+class UCMActionNode : public UCMDialogueNode
 {
 	GENERATED_BODY()
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dialogue")
-	ECMNpcComponentType ActionType;
+	ECMNpcComponentType ActionType = ECMNpcComponentType::Default;
 };
 
 UCLASS()
@@ -107,29 +113,29 @@ protected:
 public:
 
 	UFUNCTION(BlueprintCallable, Category="Dialogue")
-	UCMDialoagueNode* CreateDialogueNode(
-		TSubclassOf<UCMDialoagueNode> NodeClass,
+	UCMDialogueNode* CreateDialogueNode(
+		TSubclassOf<UCMDialogueNode> NodeClass,
 		const FText& InDialogueText
 	);
 
 	UFUNCTION(BlueprintCallable, Category="Dialogue")
-	UCMDialoagueNode* CreateDialogueNodeWithSettings(
-		TSubclassOf<UCMDialoagueNode> NodeClass,
-		UCMDialoagueNode* Parent,
+	UCMDialogueNode* CreateDialogueNodeWithSettings(
+		TSubclassOf<UCMDialogueNode> NodeClass,
+		UCMDialogueNode* Parent,
 		const FText& InDialogueText
 	);
 	
 	UFUNCTION(BlueprintCallable, Category="Dialogue")
-	UCMDialoagueNode* CreateActionNodeWithSettings(
+	UCMDialogueNode* CreateActionNodeWithSettings(
 		TSubclassOf<UCMActionNode> NodeClass,
-		UCMDialoagueNode* Parent,
+		UCMDialogueNode* Parent,
 		const FText& InDialogueText,
 		UPARAM(DisplayName="ActionType") ECMNpcComponentType InActionType
 	);
 
 	// 현재 노드를 변경하는 함수 (UI에서 사용 예정)
 	UFUNCTION(BlueprintCallable, Category="Dialogue")
-	void SetCurrentNode(UCMDialoagueNode* NewCurrentNode) { CurrentNode = NewCurrentNode; }
+	void SetCurrentNode(UCMDialogueNode* NewCurrentNode) { CurrentNode = NewCurrentNode; }
 
 	// 자식 인덱스를 이용해 현재 노드를 이동시키는 함수
 	UFUNCTION(BlueprintCallable, Category="Dialogue")
@@ -147,22 +153,35 @@ public:
 	UFUNCTION()
 	void EndDialogue();
 
+	// 현재 노드의 텍스트와 (있다면) 선택지 버튼 생성 이벤트를 UI로 전달
 	UFUNCTION()
 	void PrintCurrentDialogueNodeText();
 
+	UFUNCTION(BlueprintPure, Category="Dialogue")
+	bool IsInDialogue() const { return bIsInDialogue; }
+
 protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Dialogue")
-	TObjectPtr<UCMDialoagueNode> RootDialogueNode;
+	TObjectPtr<UCMDialogueNode> RootDialogueNode;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Dialogue")
-	TArray<TObjectPtr<UCMDialoagueNode>> AllDialogueNodes;
+	TArray<TObjectPtr<UCMDialogueNode>> AllDialogueNodes;
 	
 	UPROPERTY()
-	TObjectPtr<UCMDialoagueNode> CurrentNode = nullptr;
+	TObjectPtr<UCMDialogueNode> CurrentNode = nullptr;
 
 private:
+	UCMLocalEventManager* GetLocalEventManager();
+	void UnbindDialogueEvents();
+
+	// 자식 중 액션 노드(선택지)가 하나라도 있으면 true
+	static bool HasActionChild(const UCMDialogueNode* Node);
+
 	UPROPERTY()
 	TObjectPtr<UCMLocalEventManager> LocalEventManager = nullptr;
+
+	// 대화 진행 중 여부 (중복 StartDialogue / 중복 델리게이트 바인딩 방지)
+	bool bIsInDialogue = false;
 
 	/* Shop Data Methods */
 public:
@@ -182,11 +201,16 @@ public:
 	void RegisterToNpcWorldSubsystem();
 	void UnregisterFromNpcWorldSubsystem();
 
+private:
+	// 상점 컴포넌트를 찾아 DataTable 내용으로 초기화
+	void InitializeShopComponent();
+
 	/* Component Methods */
 public:
 	FORCEINLINE UCameraComponent* GetNpcCameraComponent() const { return NpcCameraComponent; }
 	
 	// 에디터에서 직접 지정하는 NPC 컴포넌트 목록
+	// (레벨에 배치된 인스턴스마다 다르게 구성할 수 있도록 EditAnywhere 유지)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="NPC Settings")
 	TArray<TSubclassOf<UCMNpcComponentBase>> NpcComponents;
 
@@ -201,7 +225,8 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="NPC Settings")
 	TObjectPtr<UCapsuleComponent> CapsuleComponent;
 	
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="NPC Settings")
+	// 기본 서브오브젝트 컴포넌트 포인터는 VisibleAnywhere가 관례 (컴포넌트 속성 자체는 여전히 편집 가능)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="NPC Settings")
 	TObjectPtr<USkeletalMeshComponent> MeshComponent;
 	
 	virtual void PerformInteract(); // 실제 상호작용 처리 로직
