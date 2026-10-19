@@ -5,11 +5,9 @@
 
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "Engine/GameInstance.h"
 #include "Npc/Component/CMNpcComponentBase.h"
-#include "Npc/Component/CMNpcShopComponent.h"
 #include "Game/CMLocalEventManager.h"
+#include "Npc/Component/CMNpcShopComponent.h"
 #include "Game/GameInitialization/CMNpcWorldSubsystem.h"
 
 ACMNpcBase::ACMNpcBase()
@@ -29,46 +27,49 @@ ACMNpcBase::ACMNpcBase()
 
 void ACMNpcBase::BeginPlay()
 {
-	// 주의: Super::BeginPlay() 안에서 (블루프린트 등에 미리 붙어 있는) 컴포넌트들의 BeginPlay가 실행되며
-	// 이때 RegisterComponent()로 맵에 등록될 수 있다. 따라서 초기화는 반드시 Super 호출 "이전"에 해야
-	// 이미 등록된 항목이 지워지지 않는다.
+	// 기존 맵 초기화
+	// Super::BeginPlay() 안에서 미리 붙어 있던 컴포넌트가 자신을 등록할 수 있으므로 반드시 Super 호출 전에 비운다
 	RegisteredComponentMap.Empty();
-	ActiveNpcComponents.Empty();
 
 	Super::BeginPlay();
 	
 	RegisterToNpcWorldSubsystem();	// 월드 서브시스템에 자신을 등록
 
 	// 에디터에서 지정한 NpcComponents 배열을 기반으로 컴포넌트 생성
+	ActiveNpcComponents.Empty();	
 	for (const TSubclassOf<UCMNpcComponentBase>& ComponentClass : NpcComponents)
 	{
-		if (!*ComponentClass)
+		if (*ComponentClass)
 		{
-			continue;
+			// 이 NPC를 Outer로 해서 컴포넌트 생성
+			UCMNpcComponentBase* NewComp = NewObject<UCMNpcComponentBase>(this, ComponentClass);
+			if (NewComp)
+			{
+				// Actor에 등록해서 라이프사이클을 타도록 함
+				// (액터가 BeginPlay 중이므로 이 안에서 컴포넌트의 BeginPlay가 즉시 호출됨)
+				NewComp->RegisterComponent();
+
+				// 배열에 보관
+				ActiveNpcComponents.Add(NewComp);
+
+				// 각 컴포넌트는 BeginPlay에서 스스로 핸들러에 RegisterComponentToHandler를 호출함
+			}
 		}
-
-		// 이 NPC를 Outer로 해서 컴포넌트 생성
-		UCMNpcComponentBase* NewComp = NewObject<UCMNpcComponentBase>(this, ComponentClass);
-		if (!NewComp)
-		{
-			continue;
-		}
-
-		// 액터가 BeginPlay 진행 중이므로 RegisterComponent() 내부에서 컴포넌트의 BeginPlay가 동기적으로 호출되고,
-		// 각 컴포넌트는 BeginPlay에서 스스로 핸들러(이 NPC)에 RegisterComponent를 호출한다.
-		NewComp->RegisterComponent();
-
-		ActiveNpcComponents.Add(NewComp);
 	}
 	
-	InitializeShopComponent();
+	if (RegisteredComponentMap.Contains(ECMNpcComponentType::ShopComponent))
+	{
+		if (UCMNpcShopComponent* ShopComp = Cast<UCMNpcShopComponent>(RegisteredComponentMap[ECMNpcComponentType::ShopComponent]))
+		{
+			TArray<FCMShopItemContent> OutShopItems;
+			InitializeShopDataFromTable(OutShopItems);
+			ShopComp->SetShopItemContents(OutShopItems);
+		}
+	}
 }
 
 void ACMNpcBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 대화 도중 파괴되는 경우 UI를 닫고 델리게이트 바인딩을 정리
-	EndDialogue();
-
 	// 월드 서브시스템에서 자신을 해제
 	UnregisterFromNpcWorldSubsystem();
 
@@ -120,14 +121,14 @@ void ACMNpcBase::PerformInteract()
 	StartDialogue();
 }
 
-UCMDialogueNode* ACMNpcBase::CreateDialogueNode(TSubclassOf<UCMDialogueNode> NodeClass, const FText& InDialogueText)
+UCMDialoagueNode* ACMNpcBase::CreateDialogueNode(TSubclassOf<UCMDialoagueNode> NodeClass, const FText& InDialogueText)
 {
 	if (!*NodeClass)
 	{
-		NodeClass = UCMDialogueNode::StaticClass();
+		NodeClass = UCMDialoagueNode::StaticClass();
 	}
 
-	UCMDialogueNode* NewNode = NewObject<UCMDialogueNode>(this, NodeClass);
+	UCMDialoagueNode* NewNode = NewObject<UCMDialoagueNode>(this, NodeClass);
 	if (NewNode)
 	{
 		// 생성 시점에 텍스트 설정
@@ -145,13 +146,13 @@ UCMDialogueNode* ACMNpcBase::CreateDialogueNode(TSubclassOf<UCMDialogueNode> Nod
 	return NewNode;
 }
 
-UCMDialogueNode* ACMNpcBase::CreateDialogueNodeWithSettings(
-	TSubclassOf<UCMDialogueNode> NodeClass,
-	UCMDialogueNode* Parent,
+UCMDialoagueNode* ACMNpcBase::CreateDialogueNodeWithSettings(
+	TSubclassOf<UCMDialoagueNode> NodeClass,
+	UCMDialoagueNode* Parent,
 	const FText& InDialogueText)
 {
 	// 기본 CreateDialogueNode를 통해 생성 + 텍스트 설정까지 한 번에 처리
-	UCMDialogueNode* NewNode = CreateDialogueNode(NodeClass, InDialogueText);
+	UCMDialoagueNode* NewNode = CreateDialogueNode(NodeClass, InDialogueText);
 	if (!NewNode)
 	{
 		return nullptr;
@@ -166,9 +167,9 @@ UCMDialogueNode* ACMNpcBase::CreateDialogueNodeWithSettings(
 	return NewNode;
 }
 
-UCMDialogueNode* ACMNpcBase::CreateActionNodeWithSettings(
+UCMDialoagueNode* ACMNpcBase::CreateActionNodeWithSettings(
 	TSubclassOf<UCMActionNode> NodeClass,
-	UCMDialogueNode* Parent,
+	UCMDialoagueNode* Parent,
 	const FText& InDialogueText,
 	ECMNpcComponentType InActionType)
 {
@@ -186,9 +187,6 @@ UCMDialogueNode* ACMNpcBase::CreateActionNodeWithSettings(
 	// 액션 타입 설정
 	NewNode->ActionType = InActionType;
 	NewNode->DialogueText = InDialogueText;
-
-	// 일반 대화 노드와 동일하게 전체 노드 목록에서 관리
-	AllDialogueNodes.Add(NewNode);
 
 	if (Parent)
 	{
@@ -213,7 +211,7 @@ bool ACMNpcBase::MoveToChildNodeByIndex(int32 ChildIndex)
 		return false;
 	}
 
-	UCMDialogueNode* NextNode = CurrentNode->Children[ChildIndex];
+	UCMDialoagueNode* NextNode = CurrentNode->Children[ChildIndex];
 	if (!NextNode)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("MoveToChildNodeByIndex: Child at index %d is null"), ChildIndex);
@@ -224,71 +222,44 @@ bool ACMNpcBase::MoveToChildNodeByIndex(int32 ChildIndex)
 	return true;
 }
 
-UCMLocalEventManager* ACMNpcBase::GetLocalEventManager()
-{
-	if (!LocalEventManager)
-	{
-		if (const UGameInstance* GameInstance = GetGameInstance())
-		{
-			LocalEventManager = GameInstance->GetSubsystem<UCMLocalEventManager>();
-		}
-	}
-
-	return LocalEventManager;
-}
-
-bool ACMNpcBase::HasActionChild(const UCMDialogueNode* Node)
-{
-	if (!Node)
-	{
-		return false;
-	}
-
-	for (const UCMDialogueNode* Child : Node->Children)
-	{
-		if (Cast<UCMActionNode>(Child))
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-
 void ACMNpcBase::StartDialogue()
 {
-	// 이미 대화 중이면 무시 (AddDynamic 중복 바인딩 → ensure 및 핸들러 중복 호출 방지)
-	if (bIsInDialogue)
-	{
-		return;
-	}
-
 	if (!RootDialogueNode)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("StartDialogue: RootDialogueNode is null on %s"), *GetName());
 		return;
 	}
 
-	UCMLocalEventManager* EventManager = GetLocalEventManager();
-	if (!EventManager)
+	// GameInstanceSubsystem에서 LocalEventManager 가져오기
+	UWorld* World = GetWorld();
+	if (!World)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("StartDialogue: LocalEventManager not found"));
 		return;
 	}
 
-	bIsInDialogue = true;
-	CurrentNode = RootDialogueNode;
+	UGameInstance* GameInstance = World->GetGameInstance();
+	if (!GameInstance)
+	{
+		return;
+	}
 
-	EventManager->OnSelectedDialogueChoice.AddUniqueDynamic(this, &ACMNpcBase::HandleChoiceSelected);
-	EventManager->OnNextDialogueNodeRequested.AddUniqueDynamic(this, &ACMNpcBase::OnNextDialogueNodeRequested);
-
-	// 루트 노드 텍스트 + 루트에 선택지가 있으면 버튼까지 출력
-	PrintCurrentDialogueNodeText();
+	if (!LocalEventManager)
+	{
+		LocalEventManager = GameInstance->GetSubsystem<UCMLocalEventManager>();
+	}
+	
+	if (LocalEventManager)
+	{
+		// 대화 중 다시 상호작용해도 중복 바인딩되지 않도록 AddUniqueDynamic 사용
+		LocalEventManager->OnSelectedDialogueChoice.AddUniqueDynamic(this, &ACMNpcBase::HandleChoiceSelected);
+		LocalEventManager->OnNextDialogueNodeRequested.AddUniqueDynamic(this, &ACMNpcBase::OnNextDialogueNodeRequested);
+		LocalEventManager->OnPrintDialogueNodeText.Broadcast(RootDialogueNode->DialogueText);
+	}
 }
 
 void ACMNpcBase::OnNextDialogueNodeRequested()
 {
-	if (!bIsInDialogue || !LocalEventManager)
+	if (!LocalEventManager)
 	{
 		return;
 	}
@@ -296,12 +267,6 @@ void ACMNpcBase::OnNextDialogueNodeRequested()
 	if (!CurrentNode)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("OnNextDialogueNodeRequested: CurrentNode is null"));
-		return;
-	}
-
-	// 선택지(액션 노드)가 표시된 상태라면 '다음'으로 진행하지 않고 버튼 선택을 기다림
-	if (HasActionChild(CurrentNode))
-	{
 		return;
 	}
 
@@ -320,7 +285,7 @@ void ACMNpcBase::OnNextDialogueNodeRequested()
 		return;
 	}
 	
-	UCMDialogueNode* NextNode = CurrentNode->Children[0];
+	UCMDialoagueNode* NextNode = CurrentNode->Children[0];
 	if (!NextNode)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("OnNextDialogueNodeRequested: NextNode is null"));
@@ -328,7 +293,21 @@ void ACMNpcBase::OnNextDialogueNodeRequested()
 	}
 
 	CurrentNode = NextNode;
-	PrintCurrentDialogueNodeText();
+	LocalEventManager->OnPrintDialogueNodeText.Broadcast(CurrentNode->DialogueText);
+
+	for (UCMDialoagueNode* ChildNode : CurrentNode->Children)
+	{
+		if (!ChildNode)
+		{
+			continue;
+		}
+
+		if (UCMActionNode* ActionNode = Cast<UCMActionNode>(ChildNode))
+		{
+			// 액션 노드의 텍스트와 타입을 전달
+			LocalEventManager->OnCreateChoiceButton.Broadcast(ActionNode->DialogueText, ActionNode->ActionType);
+		}
+	}
 }
 
 void ACMNpcBase::HandleChoiceSelected(ECMNpcComponentType SelectedActionType)
@@ -339,63 +318,25 @@ void ACMNpcBase::HandleChoiceSelected(ECMNpcComponentType SelectedActionType)
 
 void ACMNpcBase::EndDialogue()
 {
-	if (bIsInDialogue)
+	if (LocalEventManager)
 	{
-		// UI 쪽 콜백에서 재진입하더라도 한 번만 처리되도록 먼저 플래그를 내림
-		bIsInDialogue = false;
-
-		if (LocalEventManager)
-		{
-			LocalEventManager->OnEndDialogueNodeRequested.Broadcast();
-		}
-
-		UnbindDialogueEvents();
+		LocalEventManager->OnEndDialogueNodeRequested.Broadcast();
+		
+		LocalEventManager->OnSelectedDialogueChoice.RemoveDynamic(this, &ACMNpcBase::HandleChoiceSelected);
+		LocalEventManager->OnNextDialogueNodeRequested.RemoveDynamic(this, &ACMNpcBase::OnNextDialogueNodeRequested);
+		LocalEventManager->OnEndDialogueNodeRequested.RemoveDynamic(this, &ACMNpcBase::EndDialogue);
 	}
 
 	CurrentNode = RootDialogueNode;
 }
 
-void ACMNpcBase::UnbindDialogueEvents()
-{
-	if (!LocalEventManager)
-	{
-		return;
-	}
-
-	LocalEventManager->OnSelectedDialogueChoice.RemoveDynamic(this, &ACMNpcBase::HandleChoiceSelected);
-	LocalEventManager->OnNextDialogueNodeRequested.RemoveDynamic(this, &ACMNpcBase::OnNextDialogueNodeRequested);
-	// NOTE: OnEndDialogueNodeRequested 에는 EndDialogue를 바인딩하지 않는다.
-	// EndDialogue가 직접 이 이벤트를 Broadcast 하므로, 바인딩하면 재귀 호출이 발생한다.
-}
-
 void ACMNpcBase::PrintCurrentDialogueNodeText()
 {
-	UCMLocalEventManager* EventManager = GetLocalEventManager();
-	if (!EventManager || !CurrentNode)
-	{
-		return;
-	}
 
-	EventManager->OnPrintDialogueNodeText.Broadcast(CurrentNode->DialogueText);
-
-	for (const UCMDialogueNode* ChildNode : CurrentNode->Children)
-	{
-		if (const UCMActionNode* ActionNode = Cast<UCMActionNode>(ChildNode))
-		{
-			// 액션 노드의 텍스트와 타입을 전달
-			EventManager->OnCreateChoiceButton.Broadcast(ActionNode->DialogueText, ActionNode->ActionType);
-		}
-	}
 }
 
 bool ACMNpcBase::PerformRegisterComponent(ECMNpcComponentType ComponentType, UCMNpcComponentBase* NewComponent)
 {
-	if (!NewComponent)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("PerformRegisterComponent: NewComponent is null (type %d)."), static_cast<int32>(ComponentType));
-		return false;
-	}
-
 	if (RegisteredComponentMap.Contains(ComponentType))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("PerformRegisterComponent: ComponentType %d is already registered."), static_cast<int32>(ComponentType));
@@ -409,39 +350,18 @@ bool ACMNpcBase::PerformRegisterComponent(ECMNpcComponentType ComponentType, UCM
 
 void ACMNpcBase::HandleActionByType(ECMNpcComponentType ComponentType)
 {
-	if (UCMNpcComponentBase* Component = RegisteredComponentMap.FindRef(ComponentType))
+	if (RegisteredComponentMap.Contains(ComponentType))
 	{
-		Component->PerformAction();
+		if (UCMNpcComponentBase* Component = RegisteredComponentMap[ComponentType])
+		{
+			Component->PerformAction();
+		}
 	}
 }
 
 bool ACMNpcBase::RegisterComponent(ECMNpcComponentType ComponentType, UCMNpcComponentBase* NewComponent)
 {
 	return PerformRegisterComponent(ComponentType, NewComponent);
-}
-
-void ACMNpcBase::InitializeShopComponent()
-{
-	UCMNpcShopComponent* ShopComp = Cast<UCMNpcShopComponent>(RegisteredComponentMap.FindRef(ECMNpcComponentType::ShopComponent));
-
-	if (!ShopComp)
-	{
-		// 등록 타이밍에 의존하지 않도록, 실제 보유 중인 컴포넌트에서 직접 탐색
-		ShopComp = FindComponentByClass<UCMNpcShopComponent>();
-		if (ShopComp)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("InitializeShopComponent: ShopComponent exists on %s but is not registered to the handler."), *GetName());
-		}
-	}
-
-	if (!ShopComp)
-	{
-		return;	// 상점 기능이 없는 NPC
-	}
-
-	TArray<FCMShopItemContent> OutShopItems;
-	InitializeShopDataFromTable(OutShopItems);
-	ShopComp->SetShopItemContents(OutShopItems);
 }
 
 void ACMNpcBase::InitializeShopDataFromTable(TArray<FCMShopItemContent>& OutShopItems) const
@@ -454,18 +374,8 @@ void ACMNpcBase::InitializeShopDataFromTable(TArray<FCMShopItemContent>& OutShop
 		return;
 	}
 
-	// Row 구조체가 FCMShopItemContent 계열인지 먼저 확인 (Row마다 FindRow 에러 로그가 쏟아지는 것 방지)
-	const UScriptStruct* RowStruct = ShopItemDataTable->GetRowStruct();
-	if (!RowStruct || !RowStruct->IsChildOf(FCMShopItemContent::StaticStruct()))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("ACMNpcBase::InitializeShopDataFromTable: %s row struct is not FCMShopItemContent (NPC: %s)"),
-			*ShopItemDataTable->GetName(), *GetName());
-		return;
-	}
-
+	// NOTE: FCMShopItemContent 기반 DataTable 이라고 가정하고 전체 Row를 읽어옴
 	const TArray<FName> RowNames = ShopItemDataTable->GetRowNames();
-	OutShopItems.Reserve(RowNames.Num());
-
 	for (const FName& RowName : RowNames)
 	{
 		if (const FCMShopItemContent* Row = ShopItemDataTable->FindRow<FCMShopItemContent>(RowName, TEXT("InitializeShopDataFromTable")))
